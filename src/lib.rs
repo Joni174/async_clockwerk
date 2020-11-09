@@ -1,18 +1,18 @@
 use tokio::sync::mpsc::{Sender, Receiver};
 use tokio::time::Duration;
-use std::{thread, fmt};
 use weektime::WeekTime;
 use std::error::Error;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{self, Debug, Formatter};
 use chrono::Local;
 use env_logger::{Builder};
 use log::{debug};
 use std::io::Write;
 use std::sync::Arc;
 
-mod weektime;
+pub mod weektime;
 
 ///# Example:
+///
 ///#[tokio::main]
 ///async fn main() -> Result<(), Box<dyn Error>>{
 ///    init_logging();
@@ -41,9 +41,9 @@ mod weektime;
 ///        }
 ///    ]).await?;
 ///
-///    thread::sleep(Duration::from_secs(3));
+///    std::thread::sleep(std::time::Duration::from_secs(3));
 ///
-///    thread::sleep(Duration::from_secs(5));
+///    std::thread::sleep(std::time::Duration::from_secs(5));
 ///
 ///    Ok(())
 ///}
@@ -52,6 +52,12 @@ mod weektime;
 pub struct Operation {
     time: WeekTime,
     operation: Box<dyn Fn() + Send + Sync>,
+}
+
+impl Operation {
+    pub fn new(time: WeekTime, operation: Box<dyn Fn() + Send + Sync>) -> Self {
+        Operation{time, operation}
+    }
 }
 
 impl  Debug for Operation
@@ -68,7 +74,7 @@ pub struct Scheduler
 
 impl Scheduler
 {
-    pub fn new() -> Scheduler {
+    pub async fn new() -> Scheduler {
         let (tx, rx) = tokio::sync::mpsc::channel::<Arc<Operation>>(1000);
         tokio::spawn(Self::start_scheduler(tx.clone(), rx));
 
@@ -91,7 +97,7 @@ impl Scheduler
             tokio::spawn(async move {
                 let delay = op.time.interval_from_now();
                 debug!("setting to sleep for: {:#?}", delay);
-                tokio::time::sleep(delay).await; // wait till function schould be executed
+                tokio::time::sleep(Duration::from_secs(4)).await; // wait till function schould be executed
                 (op.operation)(); // execute scheduled function
                 tx.send(op.clone()).await.unwrap(); // reschedule current operation for next week
             });
@@ -118,5 +124,37 @@ pub fn init_logging() {
         })
         .parse_default_env()
         .init();
+}
+
+#[cfg(test)]
+mod test{
+    use crate::{Scheduler, Operation, init_logging};
+    use crate::weektime::WeekTime;
+    use std::error::Error;
+    use tokio::runtime;
+    use tokio::runtime::{Runtime, Builder};
+    use tokio::time::Duration;
+
+    #[test]
+    fn test_rescheduling() {
+        init_logging();
+
+        let b = Box::new(2);
+        let c = Box::new(3);
+
+        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        rt.spawn(async move {
+            let scheduler = Scheduler::new().await;
+            scheduler.initial_scheduling(vec![
+                Operation::new(
+                    WeekTime::from_seconds(0),
+                    Box::new(move || {println!("2: :{}", b)})),
+                Operation::new(
+                    WeekTime::from_seconds(0),
+                    Box::new(move || {println!("3: :{}", c)})),
+            ]).await;
+        });
+        std::thread::sleep(Duration::from_secs(15))
+    }
 }
 

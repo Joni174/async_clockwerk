@@ -10,7 +10,7 @@ pub struct WeekTime {
 }
 
 impl WeekTime {
-    fn new(day: Weekday, time: NaiveTime) -> WeekTime {
+    pub fn new(day: Weekday, time: NaiveTime) -> WeekTime {
         WeekTime { day, time }
     }
 
@@ -57,7 +57,7 @@ impl WeekTime {
 }
 
 #[derive(Copy, Clone, FromPrimitive, Debug)]
-enum Weekday {
+pub enum Weekday {
     Monday = 0,
     Tuesday = 1,
     Wednesday = 2,
