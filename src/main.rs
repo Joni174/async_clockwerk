@@ -1,68 +1,49 @@
 use std::thread;
 use std::collections::HashMap;
-use std::sync::{Mutex, Arc};
-use tokio::sync::{watch};
+use tokio::sync::watch;
 use tokio::runtime::Runtime;
-use tokio::time::{Duration};
-use chrono::{NaiveTime, Timelike, Local};
+use std::ops::Add;
+use tokio::time::{sleep_until, Instant, Duration};
+use chrono::{NaiveTime, Timelike, DateTime, Local, Datelike};
 use num_traits::{FromPrimitive};
-use num_derive::{FromPrimitive, ToPrimitive};
-use std::iter::FromIterator;
-
-type Closure = &'static (dyn Fn() + Sync + Send);
-type Schedule = Arc<Mutex<HashMap<usize, watch::Sender<()>>>>;
+use tokio::sync::mpsc::{Receiver, Sender};
+use std::thread::sleep;
 
 struct Operation {
-    id: usize,
-    operation: Closure,
-    weektime: WeekTime
+    time: WeekTime,
+    operation: &'static (dyn Fn() + Sync + Send),
 }
 
-impl Clone for Operation {
-    fn clone(&self) -> Self {
-        Operation{id: self.id, operation: self.operation, weektime: self.weektime.clone()}
-    }
-
-    fn clone_from(&mut self, source: &Self) {
-        unimplemented!()
-    }
-}
-
-#[derive (Clone)]
 struct WeekTime {
     day: WeekDay,
     time: NaiveTime
 }
+
 impl WeekTime {
     fn interval(&self, other: &Self) -> Duration {
-        Duration::from_secs((other.to_seconds() - self.to_seconds()) as u64)
+        Duration::from_secs(
+            ((other.to_seconds() as i32 - self.to_seconds() as i32) % (24*3600*7)) as u64)
+    }
+
+    fn interval_from_now(&self) -> Duration {
+        Self::now().interval(self)
+    }
+
+    fn now() -> WeekTime {
+        let now = Local::now();
+        WeekTime{
+            day: FromPrimitive::from_u32(now.weekday().num_days_from_monday()).unwrap(),
+            time: now.time()
+        }
     }
 
     fn to_seconds(&self) -> u32 {
         let seconds_of_day = 24 * 3600;
         (self.day as u32) * seconds_of_day + self.time.num_seconds_from_midnight()
     }
-
-    fn now() -> Self {
-        let time = Local::now();
-        WeekTime {
-            day: FromPrimitive::from_u32(3).unwrap(),
-            time: time.time()
-        }
-    }
-
-    fn add_duration(&self, delta: &Duration) -> WeekTime {
-        let seconds = (self.to_seconds() + delta.as_secs() as u32) % (3600*24*7);
-        let days = seconds / (3600 * 24);
-        let seconds = seconds - (days * 3600 * 24);
-        WeekTime {
-            day: FromPrimitive::from_u32(days).unwrap(),
-            time: NaiveTime::from_num_seconds_from_midnight(seconds,0)
-        }
-    }
 }
 
-#[derive(Copy, Clone, FromPrimitive, ToPrimitive)]
+#[derive(Copy, Clone)]
 enum WeekDay {
     Monday=0,
     Tuesday=1,
@@ -74,119 +55,70 @@ enum WeekDay {
 }
 
 struct Scheduler {
-    operations: Vec<Operation>,
-    schedule: Schedule, // shutdown handles
-    runtime: Arc<Runtime>
+    sender: Sender<Operation>
 }
 
 impl Scheduler {
-    fn new(operations: Vec<Operation>) -> Scheduler {
+    fn new() -> Scheduler {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Operation>(1000000);
+        tokio::spawn(Self::start_scheduler(tx.clone(), rx));
+
         Scheduler {
-            operations,
-            schedule: Arc::new(Mutex::new(HashMap::new())),
-            runtime: Arc::new(Runtime::new().unwrap()),
+            sender: tx
         }
     }
 
-    fn initial_scheduling(&mut self) {
-        for operation in &self.operations {
-            Self::schedule_operation(
-                Arc::clone(&self.runtime),
-                Arc::clone(&self.schedule),
-                operation.clone()
-            )
+    async fn start_scheduler(tx: Sender<Operation>, mut rx: Receiver<Operation>, ) -> Option<()> {
+        loop {
+            let operation = rx.recv().await?;
+
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(operation.time.interval_from_now()).await;
+                (operation.operation)();
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                tx.send(operation).await;
+            });
         }
+        Some(())
     }
 
-    fn schedule_operation(runtime: Arc<Runtime>,
-                          schedule: Schedule,
-                          operation: Operation) {
-        let (shutdown_tx, mut shutdown_tr) = watch::channel(());
-        schedule.lock().unwrap().insert(operation.id, shutdown_tx);
-        let duration = WeekTime::now().interval(&operation.weektime);
-
-        Self::schedule_operation_constructor(
-            Arc::clone(&runtime),
-            Arc::clone(&schedule),
-            duration,
-            operation,
-            shutdown_tr
-        );
-    }
-
-    fn schedule_operation_constructor(runtime: Arc<Runtime>,
-                                      schedule: Schedule,
-                                      duration: Duration,
-                                      operation: Operation,
-                                      mut shutdown_tr: watch::Receiver<()>) {
-        let fun = operation.operation;
-        let rt2 = Arc::clone(&runtime);
-        runtime.as_ref().spawn(
-            async move {
-                tokio::select! {
-                        _ = shutdown_tr.changed() => {
-                            Self::schedule_operation(
-                                rt2,
-                                Arc::clone(&schedule),
-                                operation
-                                );
-                        }
-                        _ = tokio::time::sleep(duration) => {(fun)();}
-                    }
-            }
-        );
+    async fn initial_scheduling(&self, operations: Vec<Operation>) {
+        for operation in operations {
+            self.sender.send(operation).await;
+        }
     }
 }
 
-fn main() {
-    let mut scheduler = Scheduler::new(vec![
+#[tokio::main]
+async fn main() {
+    println!("Hello, world!");
+
+    let mut scheduler = Scheduler::new();
+    scheduler.initial_scheduling(vec![
         Operation {
-            id: 0,
-            weektime: WeekTime::now().add_duration(&Duration::from_secs(3)),
+            time: WeekTime::from_seconds(WeekTime::now().to_seconds() + 3),
             operation: &|| println!("3 seconds passed"),
         },
         Operation {
-            id: 1,
-            weektime: WeekTime::now().add_duration(&Duration::from_secs(4)),
+            time: WeekTime::from_seconds(WeekTime::now().to_seconds() + 4),
             operation: &|| println!("4 seconds passed"),
         },
         Operation {
-            id: 2,
-            weektime: WeekTime::now().add_duration(&Duration::from_secs(5)),
+            time: WeekTime::from_seconds(WeekTime::now().to_seconds() + 5),
             operation: &|| println!("5 seconds passed"),
         },
         Operation {
-            id: 3,
-            weektime: WeekTime::now().add_duration(&Duration::from_secs(6)),
+            time: WeekTime::from_seconds(WeekTime::now().to_seconds() + 6),
             operation: &|| println!("6 seconds passed"),
         },
         Operation {
-            id: 4,
-            weektime: WeekTime::now().add_duration(&Duration::from_secs(7)),
+            time: WeekTime::from_seconds(WeekTime::now().to_seconds() + 7),
             operation: &|| println!("7 seconds passed"),
-        },
-        Operation {
-            id: 5,
-            weektime: WeekTime::now().add_duration(&Duration::from_secs(8)),
-            operation: &|| println!("8 seconds passed"),
-        },
-        Operation {
-            id: 6,
-            weektime: WeekTime::now().add_duration(&Duration::from_secs(9)),
-            operation: &|| println!("9 seconds passed"),
-        },
-        Operation {
-            id: 7,
-            weektime: WeekTime::now().add_duration(&Duration::from_secs(10)),
-            operation: &|| println!("10 seconds passed"),
-        },
-    ]);
+        }
+    ]).await;
 
-    scheduler.initial_scheduling();
+    thread::sleep(Duration::from_secs(3));
 
     thread::sleep(Duration::from_secs(5));
-
-    drop(scheduler);
-
-    // thread::sleep(Duration::from_secs(8));
 }
