@@ -49,7 +49,7 @@ mod weektime;
 ///}
 
 
-struct Operation {
+pub struct Operation {
     time: WeekTime,
     operation: Box<dyn Fn() + Send + Sync>,
 }
@@ -61,12 +61,12 @@ impl  Debug for Operation
     }
 }
 
-struct Scheduler
+pub struct Scheduler
 {
     sender: Sender<Arc<Operation>>
 }
 
-impl  Scheduler
+impl Scheduler
 {
     pub fn new() -> Scheduler {
         let (tx, rx) = tokio::sync::mpsc::channel::<Arc<Operation>>(1000);
@@ -106,7 +106,7 @@ impl  Scheduler
     }
 }
 
-fn init_logging() {
+pub fn init_logging() {
     Builder::new()
         .format(|buf, record| {
             writeln!(buf,
