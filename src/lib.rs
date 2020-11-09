@@ -10,7 +10,7 @@ use log::{debug};
 use std::io::Write;
 use std::sync::Arc;
 
-mod weektime;
+pub mod weektime;
 
 ///# Example:
 ///#[tokio::main]
@@ -58,6 +58,12 @@ impl  Debug for Operation
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "Operation {{ {:?} }}", self.time)
+    }
+}
+
+impl Operation {
+    pub fn new(time: WeekTime, operation: Box<dyn Fn() + Send + Sync>) -> Operation {
+        Operation {time, operation}
     }
 }
 
